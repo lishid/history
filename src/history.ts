@@ -37,6 +37,12 @@ const historyConfig = Facet.define<HistoryConfig, Required<HistoryConfig>>({
   }
 })
 
+function changeEnd(changes: ChangeDesc) {
+  let end = 0
+  changes.iterChangedRanges((_, to) => end = to)
+  return end
+}
+
 const historyField_ = StateField.define({
   create() {
     return HistoryState.empty
@@ -47,7 +53,8 @@ const historyField_ = StateField.define({
 
     let fromHist = tr.annotation(fromHistory)
     if (fromHist) {
-      let item = HistEvent.fromTransaction(tr), from = fromHist.side
+      let selection = tr.docChanged ? EditorSelection.single(changeEnd(tr.changes)) : undefined
+      let item = HistEvent.fromTransaction(tr, selection), from = fromHist.side
       let other = from == BranchName.Done ? state.undone : state.done
       if (item) other = updateBranch(other, other.length, config.minDepth, item)
       else other = addSelection(other, tr.startState.selection)
@@ -189,14 +196,14 @@ class HistEvent {
   // This does not check `addToHistory` and such, it assumes the
   // transaction needs to be converted to an item. Returns null when
   // there are no changes or effects in the transaction.
-  static fromTransaction(tr: Transaction) {
+  static fromTransaction(tr: Transaction, selection?: EditorSelection) {
     let effects: readonly StateEffect<any>[] = none
     for (let invert of tr.startState.facet(invertedEffects)) {
       let result = invert(tr)
       if (result.length) effects = effects.concat(result)
     }
     if (!effects.length && tr.changes.empty) return null
-    return new HistEvent(tr.changes.invert(tr.startState.doc), effects, undefined, tr.startState.selection, none)
+    return new HistEvent(tr.changes.invert(tr.startState.doc), effects, undefined, selection || tr.startState.selection, none)
   }
 
   static selection(selections: readonly EditorSelection[]) {
@@ -292,6 +299,8 @@ function mapEvent(event: HistEvent, mapping: ChangeDesc,
                        fullMapping, event.startSelection!.map(before), selections)
 }
 
+const joinableUserEvent = /^(input\.type|delete)($|\.)/
+
 class HistoryState {
   constructor(public readonly done: Branch,
               public readonly undone: Branch,
@@ -305,6 +314,7 @@ class HistoryState {
   addChanges(event: HistEvent, time: number, userEvent: string | undefined, newGroupDelay: number, maxLen: number): HistoryState {
     let done = this.done, lastEvent = done[done.length - 1]
     if (lastEvent && lastEvent.changes && !lastEvent.changes.empty && event.changes &&
+        (!userEvent || joinableUserEvent.test(userEvent)) &&
         ((!lastEvent.selectionsAfter.length &&
           time - this.prevTime < newGroupDelay &&
           isAdjacent(lastEvent.changes, event.changes)) ||
